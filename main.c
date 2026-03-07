@@ -355,20 +355,11 @@ static void poweroffCallback(void *arg)
     poweroffShutdown();
 }
 
-#if 0
-void tcp_server_thread(void *args);
-#endif
-void udp_server_thread(void *args);
+static void tcp_server_thread(void *args);
+static void udp_server_thread(void *args);
 
-#if 0
 static int tcp_server_tid;
-#endif
 static int udp_server_tid;
-
-#if 0
-static u8 tcp_buf[1048576 * 8] __attribute__((aligned(64)));
-#endif
-static u8 udp_buf[1048576 * 8] __attribute__((aligned(64)));
 
 //-------------------------------------------------------------------------
 // modified for EE
@@ -376,7 +367,6 @@ static void start_iperf_server(void)
 {
     ee_thread_t thread_param;
 
-#if 0
     // create & start the tcp thread
     thread_param.func             = (void *)tcp_server_thread;
     thread_param.stack            = tcp_server_stack;
@@ -387,7 +377,6 @@ static void start_iperf_server(void)
     tcp_server_tid = CreateThread(&thread_param);
 
     StartThread(tcp_server_tid, 0);
-#endif
 
     // create & start the udp thread
     thread_param.func             = (void *)udp_server_thread;
@@ -406,17 +395,18 @@ static void start_iperf_server(void)
 static void stop_iperf_server(void)
 {
     // delete threads
-#if 0
     DeleteThread(tcp_server_tid);
-#endif
     DeleteThread(udp_server_tid);
 }
 // The following is based on
-// https://github.com/Xilinx/embeddedsw/blob/1bb19ac1ab06ab322ba4340bed372f93ca612a18/lib/sw_apps/lwip_udp_perf_server/src/udp_perf_server.c
-// https://github.com/Xilinx/embeddedsw/blob/1bb19ac1ab06ab322ba4340bed372f93ca612a18/lib/sw_apps/lwip_udp_perf_server/src/udp_perf_server.h
+// https://github.com/Xilinx/embeddedsw/blob/1bb19ac1ab06ab322ba4340bed372f93ca612a18/lib/sw_apps/freertos_lwip_udp_perf_server/src/udp_perf_server.c
+// https://github.com/Xilinx/embeddedsw/blob/1bb19ac1ab06ab322ba4340bed372f93ca612a18/lib/sw_apps/freertos_lwip_udp_perf_server/src/udp_perf_server.h
+// https://github.com/Xilinx/embeddedsw/blob/1bb19ac1ab06ab322ba4340bed372f93ca612a18/lib/sw_apps/freertos_lwip_tcp_perf_server/src/freertos_tcp_perf_server.c
+// https://github.com/Xilinx/embeddedsw/blob/1bb19ac1ab06ab322ba4340bed372f93ca612a18/lib/sw_apps/freertos_lwip_tcp_perf_server/src/freertos_tcp_perf_server.h
 /*
- * Copyright (C) 2018 - 2022 Xilinx, Inc. All rights reserved.
- * Copyright (C) 2022 - 2024 Advanced Micro Devices, Inc.  All rights reserved
+ * Copyright (C) 2017 - 2019 Xilinx, Inc.
+ * Copyright (C) 2022 - 2024 Advanced Micro Devices, Inc.
+ * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification,
  * are permitted provided that the following conditions are met:
@@ -442,9 +432,8 @@ static void stop_iperf_server(void)
  *
  */
 
-/** Connection handle for a UDP Server session */
-
 #include <stdint.h>
+#include <inttypes.h>
 #include <time.h>
 
 #define s8_t int8_t
@@ -458,11 +447,15 @@ static void stop_iperf_server(void)
 
 #define xil_printf scr_printf
 
-static u64_t get_time_ms(void)
+#define sys_now my_sys_now
+
+#define ERR_OK 0
+
+static u64_t sys_now(void)
 {
 	struct timeval tv;
-	gettimeofday(&tv, NULL);;
-	return (((u64)tv.tv_usec / 1000) + ((u64)tv.tv_sec * 1000)) / 50; // TODO: why 50?
+	gettimeofday(&tv, NULL);
+	return (((u64)tv.tv_usec / 1000) + ((u64)tv.tv_sec * 1000));
 }
 
 /* used as indices into kLabel[] */
@@ -498,6 +491,9 @@ enum report_type {
 	UDP_ABORTED_REMOTE
 };
 
+#define TCP_DONE_SERVER UDP_DONE_SERVER
+#define TCP_ABORTED_REMOTE UDP_ABORTED_REMOTE
+
 struct interim_report {
 	u64_t start_time;
 	u64_t last_report_time;
@@ -523,15 +519,19 @@ struct perf_stats {
 
 /* server port to listen on/connect to */
 #define UDP_CONN_PORT 5001
+#define TCP_CONN_PORT UDP_CONN_PORT
+
+#define UDP_RECV_BUFSIZE 1500
+
+#define RECV_BUF_SIZE UDP_RECV_BUFSIZE
 
 static t_ip_info ip_info;
-static struct sockaddr_in sa;
-static int sa_len;
 static struct perf_stats server;
-/* Report interval in ms */
-#define REPORT_INTERVAL_TIME (INTERIM_REPORT_INTERVAL * 20)
 
-void print_app_header(void)
+/* Report interval in ms */
+#define REPORT_INTERVAL_TIME (INTERIM_REPORT_INTERVAL * 1000)
+
+static void udp_print_app_header(void)
 {
 	xil_printf("UDP server listening on port %d\r\n",
 			UDP_CONN_PORT);
@@ -541,13 +541,15 @@ void print_app_header(void)
 
 }
 
-static void print_udp_conn_stats(void)
+static void print_udp_conn_stats(struct sockaddr_in from)
 {
 	xil_printf("[%3d] local %s port %d connected with ",
 			server.client_id, inet_ntoa(ip_info.ipaddr),
 			UDP_CONN_PORT);
-	xil_printf("%s port %d\r\n", inet_ntoa(sa.sin_addr),
-			ntohs(sa.sin_port));
+
+	xil_printf("%s port %d\r\n", inet_ntoa(from.sin_addr),
+			ntohs(from.sin_port));
+
 	xil_printf("[ ID] Interval\t     Transfer     Bandwidth\t");
 	xil_printf("    Lost/Total Datagrams\n\r");
 }
@@ -604,7 +606,7 @@ static void udp_conn_report(u64_t diff,
 	/* Converting duration from milliseconds to secs,
 	 * and bandwidth to bits/sec .
 	 */
-	duration = diff / 20.0; /* secs */
+	duration = diff / 1000.0; /* secs */
 	if (duration)
 		bandwidth = (total_len / duration) * 8.0;
 
@@ -626,7 +628,7 @@ static void udp_conn_report(u64_t diff,
 	if (report_type == INTER_REPORT) {
 		server.i_report.last_report_time += duration;
 	} else if ((report_type != INTER_REPORT) && cnt_out_of_order_datagrams) {
-		xil_printf("[%3d] %s  %u datagrams received out-of-order\n\r",
+		xil_printf("[%3d] %s  %" PRIu32 " datagrams received out-of-order\n\r",
 				server.client_id, time,
 				cnt_out_of_order_datagrams);
 	}
@@ -637,7 +639,7 @@ static void reset_stats(void)
 {
 	server.client_id++;
 	/* Save start time */
-	server.start_time = get_time_ms();
+	server.start_time = sys_now();
 	server.end_time = 0; /* ms */
 	server.total_bytes = 0;
 	server.cnt_datagrams = 0;
@@ -653,138 +655,302 @@ static void reset_stats(void)
 	server.i_report.last_report_time = 0;
 }
 
-
-void udp_server_thread(void *args)
+/** Receive data on a udp session */
+static void udp_recv_perf_traffic(int sock)
 {
-    int udp_socket;
-    struct sockaddr_in peer;
-    register int r;
-	static u8_t first = 1;
+	u8_t first = 1;
+	u32_t drop_datagrams = 0;
+	s32_t recv_id;
+	int count;
+	static u64_t now;
+	char recv_buf[UDP_RECV_BUFSIZE];
+	struct sockaddr_in from;
+	socklen_t fromlen = sizeof(from);
+
+	while (1) {
+		if((count = lwip_recvfrom(sock, recv_buf, UDP_RECV_BUFSIZE, 0,
+				(struct sockaddr *)&from, &fromlen)) <= 0) {
+			continue;
+		}
+
+		/* first, check if the datagram is received in order */
+		recv_id = ntohl(*((int *)recv_buf));
+
+		if (first && (recv_id == 0 || recv_id == 1)) {
+			/* First packet should always start with recv id 0.
+			 * However, If Iperf client is running with parallel
+			 * thread, then this condition will also avoid
+			 * multiple print of connection header
+			 */
+			reset_stats();
+			/* Print connection statistics */
+			print_udp_conn_stats(from);
+			first = 0;
+		} else if (first) {
+			/* Avoid rest of the packets if client
+			 * connection is already terminated.
+			 */
+			continue;
+		}
+
+		if (recv_id < 0) {
+			u64_t diff_ms = now - server.start_time;
+			/* Send Ack */
+			if (sendto(sock, recv_buf, count, 0,
+				(struct sockaddr *)&from, fromlen) < 0) {
+				xil_printf("Error in write\n\r");
+			}
+
+			udp_conn_report(diff_ms, UDP_DONE_SERVER);
+			xil_printf("UDP test passed Successfully\n\r");
+			first = 1;
+			continue;
+		}
+
+		/* Update dropped datagrams statistics */
+		if (server.expected_datagram_id != recv_id) {
+			if (server.expected_datagram_id < recv_id) {
+				drop_datagrams =
+					recv_id - server.expected_datagram_id;
+				server.cnt_dropped_datagrams += drop_datagrams;
+				server.i_report.cnt_dropped_datagrams += drop_datagrams;
+				server.expected_datagram_id = recv_id + 1;
+			} else if (server.expected_datagram_id > recv_id) {
+				server.cnt_out_of_order_datagrams++;
+			}
+		} else {
+			server.expected_datagram_id++;
+		}
+
+		server.cnt_datagrams++;
+
+		/* Record total bytes for final report */
+		server.total_bytes += count;
+
+		if (REPORT_INTERVAL_TIME) {
+			now = sys_now();
+
+			server.i_report.cnt_datagrams++;
+
+			/* Record total bytes for interim report */
+			server.i_report.total_bytes += count;
+			if (server.i_report.start_time) {
+				u64_t diff_ms = now - server.i_report.start_time;
+
+				if (diff_ms >= REPORT_INTERVAL_TIME) {
+					udp_conn_report(diff_ms, INTER_REPORT);
+					/* Reset Interim report counters */
+					server.i_report.start_time = 0;
+					server.i_report.total_bytes = 0;
+					server.i_report.cnt_datagrams = 0;
+					server.i_report.cnt_dropped_datagrams = 0;
+				}
+			} else {
+				/* Save start time for interim report */
+				server.i_report.start_time = now;
+			}
+		}
+	}
+}
+
+static void udp_start_application(void)
+{
+	err_t err;
+	int sock;
+	struct sockaddr_in addr;
+
+	if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+		xil_printf("UDP server: Error creating Socket\r\n");
+		return;
+	}
+
+	memset(&addr, 0, sizeof(struct sockaddr_in));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(UDP_CONN_PORT);
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	err = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+	if (err != ERR_OK) {
+		xil_printf("UDP server: Error on bind: %d\r\n", err);
+		close(sock);
+		return;
+	}
+
+	udp_recv_perf_traffic(sock);
+}
+
+static void tcp_print_app_header(void)
+{
+	xil_printf("TCP server listening on port %d\r\n",
+			TCP_CONN_PORT);
+	xil_printf("On Host: Run $iperf -c %s -i %d -t 300 -w 2M\r\n",
+			inet_ntoa(ip_info.ipaddr),
+			INTERIM_REPORT_INTERVAL);
+}
+
+static void print_tcp_conn_stats(int sock)
+{
+	struct sockaddr_in local, remote;
+	int size;
+
+	size = sizeof(local);
+	getsockname(sock, (struct sockaddr *)&local, (socklen_t *)&size);
+	getpeername(sock, (struct sockaddr *)&remote, (socklen_t *)&size);
+	xil_printf("[%3d] local %s port %d connected with ", server.client_id,
+			inet_ntoa(local.sin_addr), ntohs(local.sin_port));
+	xil_printf("%s port %d\r\n", inet_ntoa(remote.sin_addr),
+			ntohs(local.sin_port));
+	xil_printf("[ ID] Interval    Transfer     Bandwidth\n\r");
+}
+
+/* The report function of a TCP server session */
+static void tcp_conn_report(u64_t diff, enum report_type report_type)
+{
+	u64_t total_len;
+	double duration, bandwidth = 0;
+	char data[16], perf[16], time[64];
+
+	if (report_type == INTER_REPORT) {
+		total_len = server.i_report.total_bytes;
+	} else {
+		server.i_report.last_report_time = 0;
+		total_len = server.total_bytes;
+	}
+
+	/* Converting duration from milliseconds to secs,
+	 * and bandwidth to bits/sec .
+	 */
+	duration = diff / 1000.0; /* secs */
+	if (duration)
+		bandwidth = (total_len / duration) * 8.0;
+
+	stats_buffer(data, total_len, BYTES);
+	stats_buffer(perf, bandwidth, SPEED);
+	/* On 32-bit platforms, xil_printf is not able to print
+	 * u64_t values, so converting these values in strings and
+	 * displaying results
+	 */
+	sprintf(time, "%4.1f-%4.1f sec",
+			(double)server.i_report.last_report_time,
+			(double)(server.i_report.last_report_time + duration));
+	xil_printf("[%3d] %s  %sBytes  %sbits/sec\n\r", server.client_id,
+			time, data, perf);
+
+	if (report_type == INTER_REPORT)
+		server.i_report.last_report_time += duration;
+}
+
+/* thread spawned for each connection */
+void tcp_recv_perf_traffic(void *p)
+{
+	char recv_buf[RECV_BUF_SIZE];
+	int read_bytes;
+	int sock = *((int *)p);
 	static u64_t now;
 
+	server.start_time = sys_now();
+	server.client_id++;
+	server.i_report.last_report_time = 0;
+	server.i_report.start_time = 0;
+	server.i_report.total_bytes = 0;
+	server.total_bytes = 0;
+
+	print_tcp_conn_stats(sock);
+
+	while (1) {
+		/* read a max of RECV_BUF_SIZE bytes from socket */
+		if ((read_bytes = lwip_recvfrom(sock, recv_buf, RECV_BUF_SIZE,
+						0, NULL, NULL)) < 0) {
+			now = sys_now();
+			u64_t diff_ms = now - server.start_time;
+			tcp_conn_report(diff_ms, TCP_ABORTED_REMOTE);
+			break;
+		}
+
+		/* break if client closed connection */
+		if (read_bytes == 0) {
+			u64_t diff_ms = now - server.start_time;
+			tcp_conn_report(diff_ms, TCP_DONE_SERVER);
+			xil_printf("TCP test passed Successfully\n\r");
+			break;
+		}
+
+		if (REPORT_INTERVAL_TIME) {
+			now = sys_now();
+			server.i_report.total_bytes += read_bytes;
+			if (server.i_report.start_time) {
+				u64_t diff_ms = now - server.i_report.start_time;
+
+				if (diff_ms >= REPORT_INTERVAL_TIME) {
+					tcp_conn_report(diff_ms, INTER_REPORT);
+					server.i_report.start_time = 0;
+					server.i_report.total_bytes = 0;
+				}
+			} else {
+				server.i_report.start_time = now;
+			}
+		}
+		/* Record total bytes for final report */
+		server.total_bytes += read_bytes;
+	}
+
+	/* close connection */
+	close(sock);
+}
+
+static void tcp_start_application(void)
+{
+	int sock, new_sd;
+	struct sockaddr_in address, remote;
+	int size;
+
+	/* set up address to connect to */
+        memset(&address, 0, sizeof(address));
+	if ((sock = lwip_socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		xil_printf("TCP server: Error creating Socket\r\n");
+		return;
+	}
+	address.sin_family = AF_INET;
+	address.sin_port = htons(TCP_CONN_PORT);
+	address.sin_addr.s_addr = INADDR_ANY;
+
+	if (bind(sock, (struct sockaddr *)&address, sizeof (address)) < 0) {
+		xil_printf("TCP server: Unable to bind to port %d\r\n",
+				TCP_CONN_PORT);
+		close(sock);
+		return;
+	}
+
+	if (listen(sock, 1) < 0) {
+		xil_printf("TCP server: tcp_listen failed\r\n");
+		close(sock);
+		return;
+	}
+
+	size = sizeof(remote);
+
+	while (1) {
+		if ((new_sd = accept(sock, (struct sockaddr *)&remote,
+						(socklen_t *)&size)) > 0)
+			tcp_recv_perf_traffic((void*)&new_sd); // TODO: spawn new thread
+	}
+}
+
+
+static void tcp_server_thread(void *args)
+{
     ps2ip_getconfig("sm0", &ip_info);
 
-    print_app_header();
+    tcp_print_app_header();
 
-    while (1) {
+    tcp_start_application();
+}
 
-        peer.sin_family = AF_INET;
-        peer.sin_port = htons(UDP_CONN_PORT);
-        peer.sin_addr.s_addr = htonl(INADDR_ANY);
+static void udp_server_thread(void *args)
+{
+    ps2ip_getconfig("sm0", &ip_info);
 
-        // create the socket
-        udp_socket = lwip_socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_socket < 0)
-            goto error;
+    udp_print_app_header();
 
-        // bind the socket
-        r = lwip_bind(udp_socket, (struct sockaddr *)&peer, sizeof(peer));
-        if (r < 0)
-            goto error;
-
-        while (1) {
-
-
-            // wait for packet
-            sa_len = sizeof(sa);
-            r = lwip_recvfrom(udp_socket, udp_buf, sizeof(udp_buf), 0, (struct sockaddr *)&sa, &sa_len);
-            if (r >= 0)
-            {
-
-				u32_t drop_datagrams = 0;
-				s32_t recv_id;
-
-				/* first, check if the datagram is received in order */
-#ifdef __MICROBLAZE__
-				/* For Microblaze, word access are at 32 bit boundaries.
-				 * To read complete 4 byte of UDP ID from data payload,
-				 * we should read upper 2 bytes from current word boundary
-				 * of payload and lower 2 bytes from next word boundary of
-				 * payload.
-				 */
-				s16_t *payload;
-				payload = (s16_t *) (udp_buf);
-				recv_id = (ntohs(payload[0]) << 16) | ntohs(payload[1]);
-#else
-				recv_id = ntohl(*((int *)(udp_buf)));
-#endif
-				if (first && (recv_id == 0 || recv_id == 1)) {
-					/* First packet should always start with recv id 0.
-					 * However, If Iperf client is running with parallel
-					 * thread, then this condition will also avoid
-					 * multiple print of connection header
-					 */
-					reset_stats();
-					/* Print connection statistics */
-					print_udp_conn_stats();
-					first = 0;
-				} else if (first) {
-					/* Avoid rest of the packets if client
-					 * connection is already terminated.
-					 */
-					return;
-				}
-
-				if (recv_id < 0) {
-					u64_t diff_ms = now - server.start_time;
-					/* Send Ack */
-					lwip_sendto(udp_socket, udp_buf, r, 0, (struct sockaddr *)&sa, sa_len);
-					udp_conn_report(diff_ms, UDP_DONE_SERVER);
-					xil_printf("UDP test passed Successfully\n\r");
-					first = 1;
-					return;
-				}
-
-				/* Update dropped datagrams statistics */
-				if (server.expected_datagram_id != recv_id) {
-					if (server.expected_datagram_id < recv_id) {
-						drop_datagrams =
-							recv_id - server.expected_datagram_id;
-						server.cnt_dropped_datagrams += drop_datagrams;
-						server.expected_datagram_id = recv_id + 1;
-					} else if (server.expected_datagram_id > recv_id) {
-						server.cnt_out_of_order_datagrams++;
-					}
-				} else {
-					server.expected_datagram_id++;
-				}
-
-				server.cnt_datagrams++;
-
-				/* Record total bytes for final report */
-				server.total_bytes += r;
-
-				if (REPORT_INTERVAL_TIME) {
-					now = get_time_ms();
-
-					server.i_report.cnt_datagrams++;
-					server.i_report.cnt_dropped_datagrams += drop_datagrams;
-
-					/* Record total bytes for interim report */
-					server.i_report.total_bytes += r;
-					if (server.i_report.start_time) {
-						u64_t diff_ms = now - server.i_report.start_time;
-
-						if (diff_ms >= REPORT_INTERVAL_TIME) {
-							udp_conn_report(diff_ms, INTER_REPORT);
-							/* Reset Interim report counters */
-							server.i_report.start_time = 0;
-							server.i_report.total_bytes = 0;
-							server.i_report.cnt_datagrams = 0;
-							server.i_report.cnt_dropped_datagrams = 0;
-						}
-					} else {
-						/* Save start time for interim report */
-						server.i_report.start_time = now;
-					}
-				}
-
-            }
-
-        }
-
-    error:
-        // close the socket
-        lwip_close(udp_socket);
-    }
+    udp_start_application();
 }

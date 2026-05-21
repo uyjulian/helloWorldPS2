@@ -2,43 +2,34 @@
 #  ____|   |    ____|   |        | |____|
 # |     ___|   |____ ___|    ____| |    \    PS2DEV Open Source Project.
 #-----------------------------------------------------------------------
-# Copyright 2001-2022, ps2dev - http://www.ps2dev.org
+# Copyright 2001-2004, ps2dev - http://www.ps2dev.org
 # Licenced under Academic Free License version 2.0
 # Review ps2sdk README & LICENSE files for further details.
 
-EE_BIN = hello.elf
-
-# KERNEL_NOPATCH = 1
-# NEWLIB_NANO = 1
-
-EE_OBJS = main.o
-EE_CFLAGS += -fdata-sections -ffunction-sections
-EE_LDFLAGS += -Wl,--gc-sections
-
-ifeq ($(DUMMY_TIMEZONE), 1)
-   EE_CFLAGS += -DDUMMY_TIMEZONE
-endif
-
-ifeq ($(DUMMY_LIBC_INIT), 1)
-   EE_CFLAGS += -DDUMMY_LIBC_INIT
-endif
-
-ifeq ($(KERNEL_NOPATCH), 1)
-   EE_CFLAGS += -DKERNEL_NOPATCH
-endif
-
-ifeq ($(DEBUG), 1)
-  EE_CFLAGS += -DDEBUG -O0 -g
-else 
-  EE_CFLAGS += -Os
-  EE_LDFLAGS += -s
-endif
+EE_BIN = pad_example.elf
+EE_OBJS = pad.o poweroff_irx.o
+EE_LIBS = -lpad -lc -ldebug -lpatches -lpoweroff
 
 all: $(EE_BIN)
 
 clean:
-	rm -rf $(EE_OBJS) $(EE_BIN)
+	$(MAKE) -C poweroff clean
+	rm -f $(EE_BIN) $(EE_OBJS) *_irx.c
 
-# Include makefiles
+run: $(EE_BIN)
+	ps2client execee host:$(EE_BIN)
+
+reset:
+	ps2client reset
+
+BIN2C=$(PS2SDK)/bin/bin2c
+
+poweroff/poweroff.irx: poweroff
+	$(MAKE) -C $<
+
+poweroff_irx.c: poweroff/poweroff.irx
+	$(BIN2C) $< $@ poweroff_irx
+
+
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal

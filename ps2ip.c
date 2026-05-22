@@ -466,8 +466,7 @@ struct jobs_dat_entry
 	char m_pad1[12];
 	uint32_t m_end_sector;
 	char m_pad2[12];
-	char m_filename[16];
-	char m_pad3[12];
+	char m_filename[28];
 	uint32_t m_job_type;
 };
 
@@ -588,7 +587,7 @@ int main(int ac, char **av)
 	valid_ent_count = 0;
 	for (i = 0; i < ent_count; i += 1)
 	{
-		char fn[17];
+		char fn[29];
 		int sector_count;
 		if (ents[i].m_job_type != 3)
 			errorx("entry %d in JOBS.DAT has job type %d", i, ents[i].m_job_type);
@@ -647,7 +646,7 @@ int main(int ac, char **av)
 		found_idx = -1;
 		for (i = 0; i < ent_count; i += 1)
 		{
-			char fn[17];
+			char fn[29];
 			int sector_count;
 			if (ents[i].m_job_type != 3)
 				errorx("entry %d in JOBS.DAT has job type %d", i, ents[i].m_job_type);

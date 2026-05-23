@@ -80,6 +80,8 @@ DEFINITION_FOR_EXTERNAL_IRX(usbmass_bd);
 
 extern int prog_main(int ac, char **av);
 
+static int g_use_dvr_hdd;
+
 static void poweroffCallback(void *arg)
 {
     scr_printf("Powering dev9 off\n");
@@ -90,18 +92,34 @@ static void poweroffCallback(void *arg)
     scr_printf("It is now safe to shut down by holding the power button\n");
 }
 
+static void disable_dev9(void)
+{
+	{
+		u16 val;
+		if (!SifIopGetVal(0xb0000004, &val, LF_VAL_SHORT) && ((val & 0x10) != 0))
+		{
+			// Needed in order for dvrdrv to work
+			{
+				u8 out[16];
+				u8 in[16];
+
+				in[0] = 1;
+				// sceCdNoticeGameStart
+				sceCdApplySCmd(0x29, in, 1, out);
+			}
+		}
+	}
+	while (fileXioDevctl("dev9x:", DDIOC_OFF, NULL, 0, NULL, 0) < 0);
+}
+
 
 int main(int ac, char **av)
 {
 	int hdd_ok;
-#if 0
 	int dvr_hdd_ok;
-#endif
 
 	hdd_ok = 0;
-#if 0
 	dvr_hdd_ok = 0;
-#endif
 	init_scr();
 
 	scr_printf("Rebooting IOP and preparing SIF...\n");
@@ -127,6 +145,7 @@ int main(int ac, char **av)
 	LOADMODULEBUFFER_EXTERNAL_IRX(usbd);
 	LOADMODULEBUFFER_EXTERNAL_IRX(usbmass_bd);
 
+	scr_clear();
 	scr_printf("Waiting for USB drive...\n");
 	scr_printf("Need help? Please visit https://uyjulian.github.io/desr-help/\n");
 	{
@@ -137,6 +156,7 @@ int main(int ac, char **av)
 		}
 	}
 
+	scr_clear();
 	LOADMODULEBUFFER_EXTERNAL_IRX(poweroff);
 	poweroffInit();
 	poweroffSetCallback(&poweroffCallback, NULL);
@@ -155,11 +175,11 @@ int main(int ac, char **av)
 		}
 	}
 
-#if 0
 	{
 		u16 val;
 		if (!SifIopGetVal(0xb0000004, &val, LF_VAL_SHORT) && ((val & 0x10) != 0))
 		{
+			int hddstat;
 			// Needed in order for dvrdrv to work
 			{
 				u8 out[16];
@@ -171,20 +191,22 @@ int main(int ac, char **av)
 			}
 			LOADMODULEBUFFER_EXTERNAL_IRX(dvrdrv);
 			LOADMODULEBUFFER_EXTERNAL_IRX(dvrfile);
-		    if (!fileXioDevctl("dvr_hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0) && (fileXioDevctl("dvr_hdd0:", HDIOC_ISLBA48, NULL, 0, NULL, 0) == 1))
-		    {
-		    	scr_printf("DVR HDD is available!\n");
+			hddstat = fileXioDevctl("dvr_hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0);
+		    if ((hddstat == 0 || hddstat == 1) && (fileXioDevctl("dvr_hdd0:", HDIOC_ISLBA48, NULL, 0, NULL, 0) == 1))
 		    	dvr_hdd_ok = 1;
-		    }
 		}
 	}
-#endif
 
 	if (!hdd_ok)
 		fatal("Fatal: HDD not available\n");
 
+	g_use_dvr_hdd = dvr_hdd_ok ? 1 : 0;
+
 	scr_clear();
-	scr_printf("Now processing, please wait a moment...\n");
+	if (g_use_dvr_hdd)
+		scr_printf("Using %s as device\n", g_use_dvr_hdd ? "dvr_hdd0:" : "hdd0:");
+	scr_printf("Now processing, this may take a while (at most 25 minutes)...\n");
+	scr_printf("Need help? Please visit https://uyjulian.github.io/desr-help/\n");
 	time_t start = time(0);
 	
 	{
@@ -197,11 +219,13 @@ int main(int ac, char **av)
 		prog_main(xac, xav);
 	}
 	double elapsed = difftime(time(0), start);
-	while (fileXioDevctl("dev9x:", DDIOC_OFF, NULL, 0, NULL, 0) < 0);
+	disable_dev9();
 	scr_clear();
 	scr_printf("Finished in %f seconds.\n", elapsed);
+	if (elapsed > 25 * 60)
+		scr_printf("Warning: this took longer than it should take.\n");
 	scr_printf("Need help? Please visit https://uyjulian.github.io/desr-help/\n");
-	scr_printf("Push the power button.\n");
+	scr_printf("Make a note of the above, then push the power button.\n");
 	SleepThread();
 
 	return 0;
@@ -217,7 +241,6 @@ static uint8_t IOBuffer[2048];
 static int g_fd = -1;
 #endif
 
-#if 0
 static inline uint32_t bswap32(uint32_t val)
 {
 #if 0
@@ -226,7 +249,6 @@ static inline uint32_t bswap32(uint32_t val)
     return (val << 24) + ((val & 0xFF00) << 8) + ((val >> 8) & 0xFF00) + ((val >> 24) & 0xFF);
 #endif
 }
-#endif
 
 int hddReadSectors(uint32_t lba, uint32_t nsectors, void *buf)
 {
@@ -244,16 +266,19 @@ int hddReadSectors(uint32_t lba, uint32_t nsectors, void *buf)
         xlba = lba + lba_offset;
         xsize = (nsectors - lba_offset) > 4 ? 4 : (nsectors - lba_offset);
 
-#if 0
-        // For dvr_hdd only
-        args->lba = bswap32(xlba);
-        args->size = bswap32(xsize);
-#else
-        args->lba = xlba;
-        args->size = xsize;
-#endif
+        if (g_use_dvr_hdd)
+        {
+	        // For dvr_hdd only
+	        args->lba = bswap32(xlba);
+	        args->size = bswap32(xsize);
+        }
+        else
+        {
+	        args->lba = xlba;
+	        args->size = xsize;
+        }
 
-        if (fileXioDevctl("hdd0:", HDIOC_READSECTOR, args, sizeof(hddAtaTransfer_t), ((u8 *)buf) + (lba_offset * 512), xsize * 512) != 0)
+        if (fileXioDevctl(g_use_dvr_hdd ? "dvr_hdd0:" : "hdd0:", HDIOC_READSECTOR, args, sizeof(hddAtaTransfer_t), ((u8 *)buf) + (lba_offset * 512), xsize * 512) != 0)
             return -1;
     }
 #else
@@ -282,16 +307,19 @@ int hddWriteSectors(uint32_t lba, uint32_t nsectors, const void *buf)
         xsize = (nsectors - lba_offset) > 3 ? 3 : (nsectors - lba_offset);
         memcpy(args->data, ((u8 *)buf) + (lba_offset * 512), xsize * 512);
 
-#if 0
-        // For dvr_hdd only
-        args->lba = bswap32(xlba);
-        args->size = bswap32(xsize);
-#else
-        args->lba = xlba;
-        args->size = xsize;
-#endif
-        
-        if (fileXioDevctl("hdd0:", HDIOC_WRITESECTOR, args, sizeof(hddAtaTransfer_t) + (xsize * 512), NULL, 0) != 0)
+        if (g_use_dvr_hdd)
+        {
+	        // For dvr_hdd only
+	        args->lba = bswap32(xlba);
+	        args->size = bswap32(xsize);
+        }
+        else
+        {
+	        args->lba = xlba;
+	        args->size = xsize;
+        }
+
+        if (fileXioDevctl(g_use_dvr_hdd ? "dvr_hdd0:" : "hdd0:", HDIOC_WRITESECTOR, args, sizeof(hddAtaTransfer_t) + (xsize * 512), NULL, 0) != 0)
             return -1;
     }
 #else
@@ -369,6 +397,7 @@ error(const char *fmt, ...)
 	STDERR_PRINTF(": %s\n", strerror(errno));
 #ifdef _EE
 	scr_printf("Need help? Please visit https://uyjulian.github.io/desr-help/\n");
+	disable_dev9();
 #endif
 	FAIL_EXIT();
 }
@@ -387,6 +416,7 @@ errorx(const char *fmt, ...)
 	STDERR_PRINTF("\n");
 #ifdef _EE
 	scr_printf("Need help? Please visit https://uyjulian.github.io/desr-help/\n");
+	disable_dev9();
 #endif
 	FAIL_EXIT();
 }
@@ -399,6 +429,20 @@ warningx(const char *fmt, ...)
 
 	STDERR_FLUSH();
 	STDERR_PRINTF("warning: ");
+	va_start(ap, fmt);
+	STDERR_VPRINTF(fmt, ap);
+	va_end(ap);
+	STDERR_PRINTF("\n");
+}
+
+/* informational message, no errno */
+static void
+infox(const char *fmt, ...)
+{
+	va_list ap;
+
+	STDERR_FLUSH();
+	STDERR_PRINTF("info: ");
 	va_start(ap, fmt);
 	STDERR_VPRINTF(fmt, ap);
 	va_end(ap);
@@ -499,6 +543,8 @@ int main(int ac, char **av)
 	}
 #endif
 
+	infox("Opening archive file...");
+
 	ents = NULL;
 	ent_count = 0;
 	f = open(av[1], O_RDONLY | O_BINARY);
@@ -515,6 +561,7 @@ int main(int ac, char **av)
 	lseek(f, 0, SEEK_SET);
 	ac(archive_read_open_fd(a, f, 8192));
 
+	infox("Reading JOBS.DAT...");
 	for (;;) {
 		ret = archive_read_next_header(a, &e);
 		if (ret == ARCHIVE_EOF)
@@ -581,6 +628,7 @@ int main(int ac, char **av)
 	if (!ents || !ent_count)
 		errorx("could not find correctly-formed JOBS.DAT in archive");
 
+	infox("Validating JOBS.DAT...");
 	int valid_ent_count;
 	int i;
 
@@ -627,7 +675,6 @@ int main(int ac, char **av)
 	if (valid_ent_count != ent_count)
 		errorx("could not find all files in archive referenced by JOBS.DAT");
 
-
 	if ((a = archive_read_new()) == NULL)
 		error("archive_read_new failed");
 
@@ -637,6 +684,7 @@ int main(int ac, char **av)
 	lseek(f, 0, SEEK_SET);
 	ac(archive_read_open_fd(a, f, 8192));
 
+	infox("Writing chunks...");
 	for (;;) {
 		int found_idx;
 		ret = archive_read_next_header(a, &e);

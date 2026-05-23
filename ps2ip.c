@@ -623,6 +623,8 @@ int main(int ac, char **av)
 				break;
 			}
 		}
+		if (ent_count)
+			break;
 	}
 
 	ac(archive_read_free(a));

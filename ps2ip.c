@@ -139,6 +139,8 @@ int main(int ac, char **av)
 	LOADMODULEBUFFER_EXTERNAL_IRX(fileXio);
 
 	fileXioInit();
+    // Increase the FILEIO R/W buffer size to reduce overhead.
+    fileXioSetRWBufferSize(256 * 1024);
 
 	LOADMODULEBUFFER_EXTERNAL_IRX(bdm);
 	LOADMODULEBUFFER_EXTERNAL_IRX(bdmfs_fatfs);
@@ -449,7 +451,7 @@ infox(const char *fmt, ...)
 	STDERR_PRINTF("\n");
 }
 
-static unsigned char buffer[8192];
+static unsigned char g_buffer[0x80000];
 
 static int
 validate_single(struct archive *a, struct archive_entry *e, const char *wanted_filename, uint64_t wanted_size)
@@ -718,7 +720,7 @@ int main(int ac, char **av)
 		written_sectors = 0;
 		for (;;)
 		{
-			len = archive_read_data(a, buffer, sizeof(buffer));
+			len = archive_read_data(a, g_buffer, sizeof(g_buffer));
 
 			if (len < 0)
 				ac(len);
@@ -727,7 +729,7 @@ int main(int ac, char **av)
 			if (len == 0)
 				break;
 
-			if (hddWriteSectors(ents[found_idx].m_start_sector + written_sectors, len / 512, buffer))
+			if (hddWriteSectors(ents[found_idx].m_start_sector + written_sectors, len / 512, g_buffer))
 				error("Disk write error");
 
 			written_sectors += len / 512;

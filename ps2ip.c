@@ -88,6 +88,14 @@ extern int _iop_reboot_count;
 static SifRpcClientData_t g_xdevctl_cd;
 static int g_xdevctl_inited;
 
+struct xdevctl_completion
+{
+	int m_async;
+	int m_sema;
+};
+
+static struct xdevctl_completion g_xdevctl_completion;
+
 static int init_xdevctl(void)
 {
     int res;
@@ -110,6 +118,21 @@ static int init_xdevctl(void)
 
     g_xdevctl_inited = 1;
 
+    if (!g_xdevctl_completion.m_sema)
+    {
+		ee_sema_t sp;
+		memset(&sp, 0, sizeof(sp));
+		sp.init_count = 1;
+		sp.max_count = 1;
+		sp.option = 0;
+		g_xdevctl_completion.m_sema = CreateSema(&sp);
+		if (g_xdevctl_completion.m_sema < 0)
+		{
+			g_xdevctl_completion.m_sema = 0;
+			return -1;
+		}
+    }
+
     return 0;
 }
 
@@ -123,20 +146,42 @@ struct rpc_79444556_stru
 	void *m_buf;
 };
 
-static int call_xdevctl_param(struct rpc_79444556_stru *stru)
+static int g_xdevctl_ret __attribute__((__aligned__(64)));
+
+
+static void cb_xdevctl_fin(void *data)
+{
+	struct xdevctl_completion *c;
+	c = (struct xdevctl_completion *)data;
+    iSignalSema(c->m_sema);
+}
+
+static int wait_xdevctl_fin(void)
+{
+	if (!g_xdevctl_completion.m_async)
+		return 0;
+	WaitSema(g_xdevctl_completion.m_sema);
+	SignalSema(g_xdevctl_completion.m_sema);
+	g_xdevctl_completion.m_async = 0;
+	return *(int *)(UNCACHED_SEG(&g_xdevctl_ret));
+}
+
+static int call_xdevctl_param(struct rpc_79444556_stru *stru, int async)
 {
     struct rpc_79444556_stru arg;
-    int ret __attribute__((__aligned__(64)));
 
     if (init_xdevctl() < 0)
         return -1;
 
+    wait_xdevctl_fin();
+
     memcpy(&arg, stru, sizeof(arg));
 
-    if (sceSifCallRpc(&g_xdevctl_cd, 0, 0, &arg, sizeof(arg), &ret, sizeof(ret), NULL, NULL) < 0)
+    if (sceSifCallRpc(&g_xdevctl_cd, 0, async ? SIF_RPC_M_NOWAIT : 0, &arg, sizeof(arg), &g_xdevctl_ret, sizeof(g_xdevctl_ret), async ? &cb_xdevctl_fin : NULL, async ? &g_xdevctl_completion : NULL) < 0)
         return -1;
 
-    return *(int *)(UNCACHED_SEG(&ret));
+    g_xdevctl_completion.m_async = async;
+    return async ? 0 : *(int *)(UNCACHED_SEG(&g_xdevctl_ret));
 }
 
 static void *alloc_str_iop(const char *str)
@@ -181,8 +226,24 @@ static int call_xdevctl_main(void *iop_name, int cmd, void *iop_arg, int arg_len
     arg.m_name = iop_name;
     arg.m_arg = iop_arg;
     arg.m_buf = iop_buf;
-    return call_xdevctl_param(&arg);
+    return call_xdevctl_param(&arg, 0);
 }
+
+#ifdef CURRENTLY_UNUSED
+static int call_xdevctl_main_async(void *iop_name, int cmd, void *iop_arg, int arg_len, void *iop_buf, int buf_len)
+{
+    struct rpc_79444556_stru arg;
+
+    memset(&arg, 0, sizeof(arg));
+    arg.m_cmd = cmd;
+    arg.m_arglen = arg_len;
+    arg.m_buflen = buf_len;
+    arg.m_name = iop_name;
+    arg.m_arg = iop_arg;
+    arg.m_buf = iop_buf;
+    return call_xdevctl_param(&arg, 1);
+}
+#endif
 
 static int call_xdevctl_simple(void *iop_name, int cmd)
 {
@@ -401,9 +462,74 @@ static struct my_io_buffer g_buffer[2];
 static int g_current_buffer;
 static void *g_iop_buffer[2];
 
-#ifndef _EE
 static int my_aio_rw_common(uint32_t lba, uint32_t nsectors, int bufidx, int dir)
 {
+#ifdef _EE
+	struct my_io_buffer *buf;
+
+	buf = &g_buffer[bufidx];
+	wait_xdevctl_fin();
+	if (nsectors > 0)
+	{
+	    hddAtaTransfer_t *args = (hddAtaTransfer_t *)buf->m_bookkeeping.m_devctlparam;
+
+		size_t dmasz;
+		SifDmaTransfer_t dmat[1];
+		int trid;
+		void *iop_dstbuf_addr;
+
+		uint32_t xlba;
+		uint32_t xsize;
+		SifRpcReceiveData_t rdata;
+
+		xlba = lba;
+		xsize = nsectors;
+
+		if (g_use_dvr_hdd)
+		{
+		    // For dvr_hdd only
+		    args->lba = bswap32(xlba);
+		    args->size = bswap32(xsize);
+		}
+		else
+		{
+		    args->lba = xlba;
+		    args->size = xsize;
+		}
+
+		dmasz = sizeof(*args) + (dir ? (xsize * 512) : 0);
+		dmat[0].src  = buf;
+		dmat[0].dest = g_iop_buffer[bufidx];
+		dmat[0].size = (dmasz + 15) & -16;
+		dmat[0].attr = 0;
+		sceSifWriteBackDCache(dmat[0].dest, dmat[0].size);
+		trid = sceSifSetDma(dmat, sizeof(dmat)/sizeof(dmat[0]));
+
+		if (!trid)
+		    return -1;
+
+		while (sceSifDmaStat(trid) >= 0);
+
+		iop_dstbuf_addr = (u8 *)(dmat[0].dest) + sizeof(struct my_io_buffer_bookkeeping);
+
+		if (call_xdevctl_main(
+			g_use_dvr_hdd ? g_iop_str_dvr_hdd : g_iop_str_hdd,
+			dir ? HDIOC_WRITESECTOR : HDIOC_READSECTOR,
+			(u8 *)(dmat[0].dest) + sizeof(buf->m_bookkeeping.m_pad),
+			dmasz,
+			dir ? NULL : iop_dstbuf_addr,
+			dir ? 0 : (xsize * 512)) != 0)
+			return -1;
+		
+		if (!dir)
+		{
+			SyncDCache(buf->m_buf, (u8 *)(buf->m_buf) + sizeof(buf->m_buf));
+			if (sceSifGetOtherData(&rdata, iop_dstbuf_addr, buf->m_buf, xsize * 512, 0) < 0)
+				return -1;
+		}
+	}
+    return 0;
+#else
 	static struct aiocb aio;
 	static const struct aiocb *aio_list[] = {NULL};
 	struct my_io_buffer *buf;
@@ -445,8 +571,8 @@ static int my_aio_rw_common(uint32_t lba, uint32_t nsectors, int bufidx, int dir
     	}
     }
     return 0;
-}
 #endif
+}
 
 static int hddInitReadWrite(void)
 {
@@ -471,122 +597,16 @@ static int hddInitReadWrite(void)
     return 0;
 }
 
+#ifdef CURRENTLY_UNUSED
 static int hddReadSectors(uint32_t lba, uint32_t nsectors, int bufidx)
 {
-#ifdef _EE
-	struct my_io_buffer *buf;
-
-	buf = &g_buffer[bufidx];
-	if (nsectors > 0)
-	{
-	    hddAtaTransfer_t *args = (hddAtaTransfer_t *)buf->m_bookkeeping.m_devctlparam;
-
-		size_t size;
-		SifDmaTransfer_t dmat[1];
-		int trid;
-		void *iop_dstbuf_addr;
-
-		uint32_t xlba;
-		uint32_t xsize;
-		SifRpcReceiveData_t rdata;
-
-		xlba = lba;
-		xsize = nsectors;
-
-		if (g_use_dvr_hdd)
-		{
-		    // For dvr_hdd only
-		    args->lba = bswap32(xlba);
-		    args->size = bswap32(xsize);
-		}
-		else
-		{
-		    args->lba = xlba;
-		    args->size = xsize;
-		}
-
-		size = sizeof(*args);
-		size = (size + 15) & -16;
-		dmat[0].src  = buf;
-		dmat[0].dest = g_iop_buffer[bufidx];
-		dmat[0].size = size;
-		dmat[0].attr = 0;
-		sceSifWriteBackDCache(dmat[0].dest, dmat[0].size);
-		trid = sceSifSetDma(dmat, sizeof(dmat)/sizeof(dmat[0]));
-
-		if (!trid)
-		    return -1;
-
-		while (sceSifDmaStat(trid) >= 0);
-
-		iop_dstbuf_addr = (u8 *)(dmat[0].dest) + sizeof(struct my_io_buffer_bookkeeping);
-
-		if (call_xdevctl_main(g_use_dvr_hdd ? g_iop_str_dvr_hdd : g_iop_str_hdd, HDIOC_READSECTOR, (u8 *)(dmat[0].dest) +  + sizeof(buf->m_bookkeeping.m_pad), sizeof(*args), iop_dstbuf_addr, xsize * 512) != 0)
-			return -1;
-		
-		SyncDCache(buf->m_buf, (u8 *)(buf->m_buf) + sizeof(buf->m_buf));
-		if (sceSifGetOtherData(&rdata, iop_dstbuf_addr, buf->m_buf, xsize * 512, 0) < 0)
-			return -1;
-	}
-    return 0;
-#else
     return my_aio_rw_common(lba, nsectors, bufidx, 0);
-#endif
 }
+#endif
 
 static int hddWriteSectors(uint32_t lba, uint32_t nsectors, int bufidx)
 {
-#ifdef _EE
-	struct my_io_buffer *buf;
-
-	buf = &g_buffer[bufidx];
-	if (nsectors > 0)
-	{
-	    hddAtaTransfer_t *args = (hddAtaTransfer_t *)buf->m_bookkeeping.m_devctlparam;
-
-		size_t size;
-		SifDmaTransfer_t dmat[1];
-		int trid;
-
-		uint32_t xlba;
-		uint32_t xsize;
-
-		xlba = lba;
-		xsize = nsectors;
-
-		if (g_use_dvr_hdd)
-		{
-		    // For dvr_hdd only
-		    args->lba = bswap32(xlba);
-		    args->size = bswap32(xsize);
-		}
-		else
-		{
-		    args->lba = xlba;
-		    args->size = xsize;
-		}
-
-		size = sizeof(*args) + (xsize * 512);
-		size = (size + 15) & -16;
-		dmat[0].src  = buf;
-		dmat[0].dest = g_iop_buffer[bufidx];
-		dmat[0].size = size;
-		dmat[0].attr = 0;
-		sceSifWriteBackDCache(dmat[0].dest, dmat[0].size);
-		trid = sceSifSetDma(dmat, sizeof(dmat)/sizeof(dmat[0]));
-
-		if (!trid)
-		    return -1;
-
-		while (sceSifDmaStat(trid) >= 0);
-
-		if (call_xdevctl_main(g_use_dvr_hdd ? g_iop_str_dvr_hdd : g_iop_str_hdd, HDIOC_WRITESECTOR, (u8 *)(dmat[0].dest) + sizeof(buf->m_bookkeeping.m_pad), sizeof(*args) + (xsize * 512), NULL, 0) != 0)
-			return -1;
-	}
-	return 0;
-#else
     return my_aio_rw_common(lba, nsectors, bufidx, 1);
-#endif
 }
 
 

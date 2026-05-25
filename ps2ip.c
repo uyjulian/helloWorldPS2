@@ -66,6 +66,7 @@ __attribute__((format(printf,1,2))) static inline void fatal(const char *format,
     }
 
 DEFINITION_FOR_EXTERNAL_IRX(iomanX);
+DEFINITION_FOR_EXTERNAL_IRX(xdevctl);
 DEFINITION_FOR_EXTERNAL_IRX(fileXio);
 DEFINITION_FOR_EXTERNAL_IRX(bdm);
 DEFINITION_FOR_EXTERNAL_IRX(bdmfs_fatfs);
@@ -74,6 +75,7 @@ DEFINITION_FOR_EXTERNAL_IRX(ps2dev9);
 DEFINITION_FOR_EXTERNAL_IRX(ps2atad);
 DEFINITION_FOR_EXTERNAL_IRX(ps2hdd);
 DEFINITION_FOR_EXTERNAL_IRX(dvrdrv);
+DEFINITION_FOR_EXTERNAL_IRX(dvrrelay);
 DEFINITION_FOR_EXTERNAL_IRX(dvrfile);
 DEFINITION_FOR_EXTERNAL_IRX(usbd);
 DEFINITION_FOR_EXTERNAL_IRX(usbmass_bd);
@@ -81,6 +83,115 @@ DEFINITION_FOR_EXTERNAL_IRX(usbmass_bd);
 extern int prog_main(int ac, char **av);
 
 static int g_use_dvr_hdd;
+
+extern int _iop_reboot_count;
+static SifRpcClientData_t g_xdevctl_cd;
+static int g_xdevctl_inited;
+
+static int init_xdevctl(void)
+{
+    int res;
+
+    static int _rb_count = -1;
+    if (_rb_count != _iop_reboot_count)
+    {
+        _rb_count = _iop_reboot_count;
+        memset(&g_xdevctl_cd, 0, sizeof(g_xdevctl_cd));
+        g_xdevctl_inited = 0;
+    }
+
+    if (g_xdevctl_inited)
+        return 0;
+
+    sceSifInitRpc(0);
+
+    while ((res = sceSifBindRpc(&g_xdevctl_cd, 0x79444556, 0)) < 0 || !g_xdevctl_cd.server)
+        nopdelay();
+
+    g_xdevctl_inited = 1;
+
+    return 0;
+}
+
+struct rpc_79444556_stru
+{
+	int m_cmd;
+	int m_arglen;
+	int m_buflen;
+	char *m_name;
+	void *m_arg;
+	void *m_buf;
+};
+
+static int call_xdevctl_param(struct rpc_79444556_stru *stru)
+{
+    struct rpc_79444556_stru arg;
+    int ret __attribute__((__aligned__(64)));
+
+    if (init_xdevctl() < 0)
+        return -1;
+
+    memcpy(&arg, stru, sizeof(arg));
+
+    if (sceSifCallRpc(&g_xdevctl_cd, 0, 0, &arg, sizeof(arg), &ret, sizeof(ret), NULL, NULL) < 0)
+        return -1;
+
+    return *(int *)(UNCACHED_SEG(&ret));
+}
+
+static void *alloc_str_iop(const char *str)
+{
+    size_t size;
+    SifDmaTransfer_t dmat[1];
+    int trid;
+    void *iop_addr;
+    static char str_aligned[64] __attribute__((aligned(64)));
+
+    size = strlen(str) + 1;
+    if (size > sizeof(str_aligned))
+    	return NULL;
+    memset(UNCACHED_SEG(str_aligned), 0, sizeof(str_aligned));
+    memcpy(UNCACHED_SEG(str_aligned), str, size);
+
+    if (!(iop_addr = SifAllocIopHeap(size)))
+        return NULL;
+
+    dmat[0].src  = str_aligned;
+    dmat[0].dest = iop_addr;
+    dmat[0].size = sizeof(str_aligned);
+    dmat[0].attr = 0;
+    trid = sceSifSetDma(dmat, sizeof(dmat)/sizeof(dmat[0]));
+
+    if (!trid)
+        return NULL;
+
+    while (sceSifDmaStat(trid) >= 0);
+
+    return iop_addr;
+}
+
+static int call_xdevctl_main(void *iop_name, int cmd, void *iop_arg, int arg_len, void *iop_buf, int buf_len)
+{
+    struct rpc_79444556_stru arg;
+
+    memset(&arg, 0, sizeof(arg));
+    arg.m_cmd = cmd;
+    arg.m_arglen = arg_len;
+    arg.m_buflen = buf_len;
+    arg.m_name = iop_name;
+    arg.m_arg = iop_arg;
+    arg.m_buf = iop_buf;
+    return call_xdevctl_param(&arg);
+}
+
+static int call_xdevctl_simple(void *iop_name, int cmd)
+{
+    return call_xdevctl_main(iop_name, cmd, NULL, 0, NULL, 0);
+}
+
+static void *g_iop_str_hdd;
+static void *g_iop_str_dvr_hdd;
+static void *g_iop_str_dev9x;
 
 static void poweroffCallback(void *arg)
 {
@@ -112,7 +223,6 @@ static void disable_dev9(void)
 	while (fileXioDevctl("dev9x:", DDIOC_OFF, NULL, 0, NULL, 0) < 0);
 }
 
-
 int main(int ac, char **av)
 {
 	int hdd_ok;
@@ -136,6 +246,10 @@ int main(int ac, char **av)
 	sbv_patch_enable_lmb();
 
 	LOADMODULEBUFFER_EXTERNAL_IRX(iomanX);
+	LOADMODULEBUFFER_EXTERNAL_IRX(xdevctl);
+
+	init_xdevctl();
+
 	LOADMODULEBUFFER_EXTERNAL_IRX(fileXio);
 
 	fileXioInit();
@@ -164,6 +278,14 @@ int main(int ac, char **av)
 	poweroffSetCallback(&poweroffCallback, NULL);
 
 	LOADMODULEBUFFER_EXTERNAL_IRX(ps2dev9);
+	
+	g_iop_str_hdd = alloc_str_iop("hdd0:");
+	g_iop_str_dvr_hdd = alloc_str_iop("dvr_hdd0:");
+	g_iop_str_dev9x = alloc_str_iop("dev9x:");
+	if (!g_iop_str_hdd || !g_iop_str_dvr_hdd || !g_iop_str_dev9x)
+	{
+		fatal("IOP string allocation failed");
+	}
 	{
 		u16 val;
 		if (!SifIopGetVal(0xb0000004, &val, LF_VAL_SHORT) && ((val & 0x02) != 0))
@@ -171,7 +293,7 @@ int main(int ac, char **av)
 			int hddstat;
 			LOADMODULEBUFFER_EXTERNAL_IRX(ps2atad);
 			LOADMODULEBUFFER_EXTERNAL_IRX(ps2hdd);
-			hddstat = fileXioDevctl("hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0);
+			hddstat = call_xdevctl_simple(g_iop_str_hdd, HDIOC_STATUS);
 		    if (hddstat == 0 || hddstat == 1)
 		    	hdd_ok = 1;
 		}
@@ -192,9 +314,10 @@ int main(int ac, char **av)
 				sceCdApplySCmd(0x29, in, 1, out);
 			}
 			LOADMODULEBUFFER_EXTERNAL_IRX(dvrdrv);
+			LOADMODULEBUFFER_EXTERNAL_IRX(dvrrelay);
 			LOADMODULEBUFFER_EXTERNAL_IRX(dvrfile);
-			hddstat = fileXioDevctl("dvr_hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0);
-		    if ((hddstat == 0 || hddstat == 1) && (fileXioDevctl("dvr_hdd0:", HDIOC_ISLBA48, NULL, 0, NULL, 0) == 1))
+			hddstat = call_xdevctl_simple(g_iop_str_dvr_hdd, HDIOC_STATUS);
+		    if ((hddstat == 0 || hddstat == 1) && (call_xdevctl_simple(g_iop_str_dvr_hdd, HDIOC_ISLBA48) == 1))
 		    	dvr_hdd_ok = 1;
 		}
 	}
@@ -236,12 +359,34 @@ int main(int ac, char **av)
 
 #include <stdint.h>
 #include <unistd.h>
+#ifndef _EE
+#include <aio.h>
+#include <errno.h>
+#include <string.h>
+#endif
 
-#ifdef _EE
-static uint8_t IOBuffer[2048];
-#else
+#ifndef _EE
 static int g_fd = -1;
 #endif
+
+struct my_io_buffer_bookkeeping
+{
+#ifdef _EE
+	char m_pad[56];
+	char m_devctlparam[8];
+#else
+	char m_pad[64];
+#endif
+};
+
+// filexio is limited to 2048 (4 sectors) bytes both arg and buf buffers. (no longer using)
+// dvrfile is limited to 32768 bytes (64 sectors) both arg and buf buffers.
+// Former buffer size: 0x80000
+struct my_io_buffer
+{
+	struct my_io_buffer_bookkeeping m_bookkeeping;
+	char m_buf[0x8000];
+} __attribute__((__aligned__(64)));
 
 static inline uint32_t bswap32(uint32_t val)
 {
@@ -252,84 +397,196 @@ static inline uint32_t bswap32(uint32_t val)
 #endif
 }
 
-int hddReadSectors(uint32_t lba, uint32_t nsectors, void *buf)
+static struct my_io_buffer g_buffer[2];
+static int g_current_buffer;
+static void *g_iop_buffer[2];
+
+#ifndef _EE
+static int my_aio_rw_common(uint32_t lba, uint32_t nsectors, int bufidx, int dir)
 {
-#ifdef _EE
-    hddAtaTransfer_t *args = (hddAtaTransfer_t *)IOBuffer;
-    uint32_t lba_offset;
-
-    // filexio is limited to 2048 (4 sectors) bytes both arg and buf buffers.
-    // dvrfile is limited to 32768 bytes (64 sectors) both arg and buf buffers.
-    for (lba_offset = 0; lba_offset < nsectors; lba_offset += args->size)
+	static struct aiocb aio;
+	static const struct aiocb *aio_list[] = {NULL};
+	struct my_io_buffer *buf;
+	int ret;
+	buf = &g_buffer[bufidx];
+	if (aio_list[0])
+	{
+		ret = aio_suspend(aio_list, sizeof(aio_list)/sizeof(aio_list[0]), NULL);
+		if (ret == -1)
+		{
+			aio_list[0] = NULL;
+			return errno;
+		}
+		ret = aio_error(&aio);
+		if (ret)
+		{
+			aio_list[0] = NULL;
+			return ret;
+		}
+		ret = aio_return(&aio);
+		if (ret != aio.aio_nbytes)
+		{
+			aio_list[0] = NULL;
+			return -1;
+		}
+		aio_list[0] = NULL;
+	}
+    if (nsectors > 0)
     {
-    	uint32_t xlba;
-    	uint32_t xsize;
-
-        xlba = lba + lba_offset;
-        xsize = (nsectors - lba_offset) > 4 ? 4 : (nsectors - lba_offset);
-
-        if (g_use_dvr_hdd)
-        {
-	        // For dvr_hdd only
-	        args->lba = bswap32(xlba);
-	        args->size = bswap32(xsize);
-        }
-        else
-        {
-	        args->lba = xlba;
-	        args->size = xsize;
-        }
-
-        if (fileXioDevctl(g_use_dvr_hdd ? "dvr_hdd0:" : "hdd0:", HDIOC_READSECTOR, args, sizeof(hddAtaTransfer_t), ((u8 *)buf) + (lba_offset * 512), xsize * 512) != 0)
-            return -1;
+    	if (g_fd >= 0)
+    	{
+			memset(&aio, 0, sizeof(aio));
+			aio.aio_fildes = g_fd;
+			aio.aio_buf = (void *)buf->m_buf;
+			aio.aio_nbytes = nsectors * 512;
+			aio.aio_offset = lba * 512;
+			(dir ? aio_write : aio_read)(&aio);
+			aio_list[0] = &aio;
+    	}
     }
-#else
-    if (g_fd >= 0 && pread(g_fd, buf, nsectors * 512, lba * 512) != nsectors * 512)
-    	return -1;
+    return 0;
+}
 #endif
 
+static int hddInitReadWrite(void)
+{
+#ifdef _EE
+	int size;
+	int buffer_count;
+	void *iop_addr;
+	int i;
 
+	buffer_count = sizeof(g_buffer)/sizeof(g_buffer[0]);
+	size = sizeof(g_buffer[0]) * buffer_count;
+    /* Round the size up to the nearest 16 bytes. */
+    size = (size + 15) & -16;
+
+    iop_addr = SifAllocIopHeap(size);
+    if (!iop_addr)
+        return -1;
+
+    for (i = 0; i < buffer_count; i += 1)
+    	g_iop_buffer[i] = ((u8 *)iop_addr) + sizeof(g_buffer[0]);
+#endif
     return 0;
 }
 
-int hddWriteSectors(uint32_t lba, uint32_t nsectors, const void *buf)
+static int hddReadSectors(uint32_t lba, uint32_t nsectors, int bufidx)
 {
 #ifdef _EE
-    static u8 WriteBuffer[3 * 512 + sizeof(hddAtaTransfer_t)]; // Has to be a different buffer from IOBuffer (input can be in IOBuffer).
-    hddAtaTransfer_t *args = (hddAtaTransfer_t *)WriteBuffer;
-    uint32_t lba_offset;
+	struct my_io_buffer *buf;
 
-    // filexio is limited to 2048 (4 sectors) bytes both arg and buf buffers.
-    // dvrfile is limited to 32768 bytes (64 sectors) both arg and buf buffers.
-    for (lba_offset = 0; lba_offset < nsectors; lba_offset += args->size)
-    {
-    	uint32_t xlba;
-    	uint32_t xsize;
-        xlba = lba + lba_offset;
-        xsize = (nsectors - lba_offset) > 3 ? 3 : (nsectors - lba_offset);
-        memcpy(args->data, ((u8 *)buf) + (lba_offset * 512), xsize * 512);
+	buf = &g_buffer[bufidx];
+	if (nsectors > 0)
+	{
+	    hddAtaTransfer_t *args = (hddAtaTransfer_t *)buf->m_bookkeeping.m_devctlparam;
 
-        if (g_use_dvr_hdd)
-        {
-	        // For dvr_hdd only
-	        args->lba = bswap32(xlba);
-	        args->size = bswap32(xsize);
-        }
-        else
-        {
-	        args->lba = xlba;
-	        args->size = xsize;
-        }
+		size_t size;
+		SifDmaTransfer_t dmat[1];
+		int trid;
+		void *iop_dstbuf_addr;
 
-        if (fileXioDevctl(g_use_dvr_hdd ? "dvr_hdd0:" : "hdd0:", HDIOC_WRITESECTOR, args, sizeof(hddAtaTransfer_t) + (xsize * 512), NULL, 0) != 0)
-            return -1;
-    }
-#else
-    if (g_fd >= 0 && pwrite(g_fd, buf, nsectors * 512, lba * 512) != nsectors * 512)
-    	return -1;
-#endif
+		uint32_t xlba;
+		uint32_t xsize;
+		SifRpcReceiveData_t rdata;
 
+		xlba = lba;
+		xsize = nsectors;
+
+		if (g_use_dvr_hdd)
+		{
+		    // For dvr_hdd only
+		    args->lba = bswap32(xlba);
+		    args->size = bswap32(xsize);
+		}
+		else
+		{
+		    args->lba = xlba;
+		    args->size = xsize;
+		}
+
+		size = sizeof(*args);
+		size = (size + 15) & -16;
+		dmat[0].src  = buf;
+		dmat[0].dest = g_iop_buffer[bufidx];
+		dmat[0].size = size;
+		dmat[0].attr = 0;
+		sceSifWriteBackDCache(dmat[0].dest, dmat[0].size);
+		trid = sceSifSetDma(dmat, sizeof(dmat)/sizeof(dmat[0]));
+
+		if (!trid)
+		    return -1;
+
+		while (sceSifDmaStat(trid) >= 0);
+
+		iop_dstbuf_addr = (u8 *)(dmat[0].dest) + sizeof(struct my_io_buffer_bookkeeping);
+
+		if (call_xdevctl_main(g_use_dvr_hdd ? g_iop_str_dvr_hdd : g_iop_str_hdd, HDIOC_READSECTOR, (u8 *)(dmat[0].dest) +  + sizeof(buf->m_bookkeeping.m_pad), sizeof(*args), iop_dstbuf_addr, xsize * 512) != 0)
+			return -1;
+		
+		SyncDCache(buf->m_buf, (u8 *)(buf->m_buf) + sizeof(buf->m_buf));
+		if (sceSifGetOtherData(&rdata, iop_dstbuf_addr, buf->m_buf, xsize * 512, 0) < 0)
+			return -1;
+	}
     return 0;
+#else
+    return my_aio_rw_common(lba, nsectors, bufidx, 0);
+#endif
+}
+
+static int hddWriteSectors(uint32_t lba, uint32_t nsectors, int bufidx)
+{
+#ifdef _EE
+	struct my_io_buffer *buf;
+
+	buf = &g_buffer[bufidx];
+	if (nsectors > 0)
+	{
+	    hddAtaTransfer_t *args = (hddAtaTransfer_t *)buf->m_bookkeeping.m_devctlparam;
+
+		size_t size;
+		SifDmaTransfer_t dmat[1];
+		int trid;
+
+		uint32_t xlba;
+		uint32_t xsize;
+
+		xlba = lba;
+		xsize = nsectors;
+
+		if (g_use_dvr_hdd)
+		{
+		    // For dvr_hdd only
+		    args->lba = bswap32(xlba);
+		    args->size = bswap32(xsize);
+		}
+		else
+		{
+		    args->lba = xlba;
+		    args->size = xsize;
+		}
+
+		size = sizeof(*args) + (xsize * 512);
+		size = (size + 15) & -16;
+		dmat[0].src  = buf;
+		dmat[0].dest = g_iop_buffer[bufidx];
+		dmat[0].size = size;
+		dmat[0].attr = 0;
+		sceSifWriteBackDCache(dmat[0].dest, dmat[0].size);
+		trid = sceSifSetDma(dmat, sizeof(dmat)/sizeof(dmat[0]));
+
+		if (!trid)
+		    return -1;
+
+		while (sceSifDmaStat(trid) >= 0);
+
+		if (call_xdevctl_main(g_use_dvr_hdd ? g_iop_str_dvr_hdd : g_iop_str_hdd, HDIOC_WRITESECTOR, (u8 *)(dmat[0].dest) + sizeof(buf->m_bookkeeping.m_pad), sizeof(*args) + (xsize * 512), NULL, 0) != 0)
+			return -1;
+	}
+	return 0;
+#else
+    return my_aio_rw_common(lba, nsectors, bufidx, 1);
+#endif
 }
 
 
@@ -451,8 +708,6 @@ infox(const char *fmt, ...)
 	STDERR_PRINTF("\n");
 }
 
-static unsigned char g_buffer[0x80000];
-
 static int
 validate_single(struct archive *a, struct archive_entry *e, const char *wanted_filename, uint64_t wanted_size)
 {
@@ -544,6 +799,9 @@ int main(int ac, char **av)
 			error("Could not open image for writing");
 	}
 #endif
+
+	if (hddInitReadWrite())
+		errorx("Could not init IOP memory for read/write");
 
 	infox("Opening archive file...");
 
@@ -689,6 +947,7 @@ int main(int ac, char **av)
 	ac(archive_read_open_fd(a, f, 8192));
 
 	infox("Writing chunks...");
+	g_current_buffer = 0;
 	for (;;) {
 		int found_idx;
 		ret = archive_read_next_header(a, &e);
@@ -722,7 +981,7 @@ int main(int ac, char **av)
 		written_sectors = 0;
 		for (;;)
 		{
-			len = archive_read_data(a, g_buffer, sizeof(g_buffer));
+			len = archive_read_data(a, g_buffer[g_current_buffer].m_buf, sizeof(g_buffer[g_current_buffer].m_buf));
 
 			if (len < 0)
 				ac(len);
@@ -731,12 +990,16 @@ int main(int ac, char **av)
 			if (len == 0)
 				break;
 
-			if (hddWriteSectors(ents[found_idx].m_start_sector + written_sectors, len / 512, g_buffer))
+			if (hddWriteSectors(ents[found_idx].m_start_sector + written_sectors, len / 512, g_current_buffer))
 				error("Disk write error");
 
 			written_sectors += len / 512;
+			g_current_buffer ^= 1;
 		}
 	}
+
+	if (hddWriteSectors(0, 0, 0))
+		error("Disk write error");
 
 	ac(archive_read_free(a));
 	close(f);

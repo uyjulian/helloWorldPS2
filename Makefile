@@ -23,7 +23,7 @@ IOPMODULES_PS2SDK = \
 PKGCONFIG_DEPS = libarchive
 
 EE_BIN = hddrework7z.elf
-EE_OBJS = ps2ip.o
+EE_OBJS = ps2ip.o xdevctl_irx.o dvrrelay_irx.o
 
 EE_LIBS = -lpoweroff -lfileXio -ldebug -lpatches -lc -ldebug -lpatches
 EE_INCS = -I$(PS2SDK)/ports/include
@@ -34,6 +34,8 @@ EE_OBJS += $(patsubst %,ps2sdk_%_irx.o,$(IOPMODULES_PS2SDK))
 all: $(EE_BIN)
 
 clean:
+	$(MAKE) -C xdevctl clean
+	$(MAKE) -C dvrrelay clean
 	rm -f $(EE_BIN) $(EE_OBJS) *_irx.c
 
 run: $(EE_BIN)
@@ -43,6 +45,18 @@ reset:
 	ps2client reset
 
 BIN2C=$(PS2SDK)/bin/bin2c
+
+xdevctl/xdevctl.irx: xdevctl
+	$(MAKE) -C $<
+
+xdevctl_irx.c: xdevctl/xdevctl.irx
+	$(BIN2C) $< $@ $(subst -,_,$(subst .,_,$(notdir $<)))
+
+dvrrelay/dvrrelay.irx: dvrrelay
+	$(MAKE) -C $<
+
+dvrrelay_irx.c: dvrrelay/dvrrelay.irx
+	$(BIN2C) $< $@ $(subst -,_,$(subst .,_,$(notdir $<)))
 
 ps2sdk_%_irx.c: $(PS2SDK)/iop/irx/%.irx
 	$(BIN2C) $< $@ $(subst -,_,$(subst .,_,$(notdir $<)))

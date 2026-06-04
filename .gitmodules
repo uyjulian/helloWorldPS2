@@ -1,0 +1,3 @@
+[submodule "mongoose"]
+	path = mongoose
+	url = ssh://git@github.com/cesanta/mongoose.git

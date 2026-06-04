@@ -21,6 +21,7 @@
 #include <fileXio_rpc.h>
 #include <libcdvd.h>
 #include <mongoose/mongoose.h>
+#include <delaythread.h>
 
 extern unsigned char DEV9_irx[];
 extern unsigned int size_DEV9_irx;
@@ -300,8 +301,10 @@ int main(int argc, char *argv[])
 	EthernetLinkMode = NETMAN_NETIF_ETH_LINK_MODE_AUTO;
 
 	//Attempt to apply the new link setting.
-	if(ethApplyNetIFConfig(EthernetLinkMode) != 0) {
+	if(ethApplyNetIFConfig(EthernetLinkMode) != 0)
+	{
 		scr_printf("Error: failed to set link mode.\n");
+		SleepThread();
 		goto end;
 	}
 
@@ -320,8 +323,10 @@ int main(int argc, char *argv[])
 
 	//Wait for the link to become ready.
 	scr_printf("Waiting for connection...\n");
-	if(ethWaitValidNetIFLinkState() != 0) {
+	if (ethWaitValidNetIFLinkState() != 0)
+	{
 		scr_printf("Error: failed to get valid link status.\n");
+		SleepThread();
 		goto end;
 	}
 
@@ -330,6 +335,7 @@ int main(int argc, char *argv[])
 	if (ethWaitValidDHCPState() != 0)
 	{
 		scr_printf("DHCP failed\n.");
+		SleepThread();
 		goto end;
 	}
 	scr_printf("done!\n");
@@ -361,10 +367,16 @@ int main(int argc, char *argv[])
     	device_point = "dvr_hdd0:";
     }
 
-	scr_printf("Initing HDLD server:\n");
+	scr_printf("Initing Mongoose HTTP server:\n");
     start_mongoose_server();
 	//At this point, network support has been initialized and the PS2 can be pinged.
 	scr_printf("Everything inited!\n");
+	t_ip_info ip_info;
+	if (ps2ip_getconfig("sm0", &ip_info) >= 0)
+	{
+		scr_printf("On Host: Access http://%s:80/fs/dvr_hdd0/__xcontents/\n", inet_ntoa(ip_info.ipaddr));
+		scr_printf("On Host: Access http://%s:80/fs/dvr_hdd0/__xdata/\n", inet_ntoa(ip_info.ipaddr));
+	}
 	SleepThread();
 
 end:
@@ -395,7 +407,7 @@ static void poweroffCallback(void *arg)
 static void mongoose_server_thread(void *args);
 
 static int g_mongoose_server_tid;
-static u8 g_mongoose_server_stack[0x1000] __attribute__((aligned(16)));
+static u8 g_mongoose_server_stack[0x10000] __attribute__((aligned(16)));
 
 //-------------------------------------------------------------------------
 // modified for EE
@@ -433,9 +445,13 @@ static void mongoose_ev_handler(struct mg_connection *c, int ev, void *ev_data)
 		scr_printf("%.*s %.*s (#%d)\n", (int)hm->method.len, hm->method.buf, (int)hm->uri.len, hm->uri.buf,
 				   ++req_count);
 
+#define EXAMPLE_USE_HDD
 #ifdef EXAMPLE_USE_HDD
 		// Set our root directory to the mounted hdd0:WWW partition
-		struct mg_http_serve_opts opts = {.root_dir = "pfs:."};
+		struct mg_http_serve_opts opts = {
+			.root_dir = "pfs0:.,/fs/dvr_hdd0/__xcontents/=dvr_pfs0:.,/fs/dvr_hdd0/__xdata/=dvr_pfs1:.",
+			.mime_types = "*=application/octet-stream",
+		};
 		// Allow Mongoose to serve the request
 		mg_http_serve_dir(c, hm, &opts);
 #else
@@ -452,15 +468,21 @@ static void mongoose_server_thread(void *args)
 {
 	struct mg_mgr mgr;
 
+	mg_log_set(MG_LL_NONE);
 	// Init Mongoose
 	mg_mgr_init(&mgr);
 
 	// Listen on port 80. Set callback function
-	mg_http_listen(&mgr, "http://0.0.0.0:80", mongoose_ev_handler, &mgr);
+	if (!mg_http_listen(&mgr, "http://0.0.0.0:80", mongoose_ev_handler, &mgr)) {
+		scr_printf("mg_http_listen failed\n");
+		SleepThread();
+	}
 
 	// Loop forever, accepting new connections
-	while (1)
-		mg_mgr_poll(&mgr, 1000);
+	while (1) {
+		mg_mgr_poll(&mgr, 0);
+		DelayThread(5 * 1000);
+	}
 
 	// Clean up
 	mg_mgr_free(&mgr);

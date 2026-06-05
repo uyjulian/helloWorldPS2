@@ -22,6 +22,7 @@
 #include <libcdvd.h>
 #include <mongoose/mongoose.h>
 #include <delaythread.h>
+#include <ps2sdkapi.h>
 
 extern unsigned char DEV9_irx[];
 extern unsigned int size_DEV9_irx;
@@ -434,6 +435,83 @@ static void stop_mongoose_server(void)
     DeleteThread(g_mongoose_server_tid);
 }
 
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
+static int p_stat(const char *path, size_t *size, time_t *mtime)
+{
+	struct stat st;
+	if (stat(path, &st) != 0) return 0;
+	if (size) *size = (size_t) st.st_size;
+	if (mtime) *mtime = st.st_mtime;
+	return MG_FS_READ | MG_FS_WRITE | (S_ISDIR(st.st_mode) ? MG_FS_DIR : 0);
+}
+
+static void p_list(const char *dir, void (*fn)(const char *, void *),
+									 void *userdata) {
+	struct dirent *dp;
+	DIR *dirp;
+	if ((dirp = (opendir(dir))) == NULL) return;
+	while ((dp = readdir(dirp)) != NULL) {
+		if (!strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..")) continue;
+		fn(dp->d_name, userdata);
+	}
+	closedir(dirp);
+}
+
+static void *p_open(const char *path, int flags) {
+	int fd;
+
+	fd = open(path, (flags == MG_FS_READ ? O_RDONLY : (O_RDWR | O_CREAT | O_APPEND)) | O_BINARY | O_CLOEXEC, 0777);
+	return (fd >= 0) ? (void *)(uiptr)fd : NULL;
+}
+
+static void p_close(void *fp) {
+	close((int)(uiptr)fp);
+}
+
+static size_t p_read(void *fp, void *buf, size_t len) {
+	return read((int)(uiptr)fp, buf, len);
+}
+
+static size_t p_write(void *fp, const void *buf, size_t len) {
+	return write((int)(uiptr)fp, buf, len);
+}
+
+static size_t p_seek(void *fp, size_t offset) {
+	return (size_t)lseek64((int)(uiptr)fp, (off64_t)offset, SEEK_SET);
+}
+
+static bool p_rename(const char *from, const char *to) {
+	return rename(from, to) == 0;
+}
+
+static bool p_remove(const char *path) {
+	return remove(path) == 0;
+}
+
+static bool p_mkdir(const char *path) {
+	return mkdir(path, 0775) == 0;
+}
+
+static struct mg_fs g_mg_fs_ps2sdk_posix = {
+	p_stat,
+	p_list,
+	p_open,
+	p_close,
+	p_read,
+	p_write,
+	p_seek,
+	p_rename,
+	p_remove,
+	p_mkdir,
+};
+
 static int req_count = 0;
 
 static void mongoose_ev_handler(struct mg_connection *c, int ev, void *ev_data)
@@ -451,6 +529,7 @@ static void mongoose_ev_handler(struct mg_connection *c, int ev, void *ev_data)
 		struct mg_http_serve_opts opts = {
 			.root_dir = "pfs0:.,/fs/dvr_hdd0/__xcontents/=dvr_pfs0:.,/fs/dvr_hdd0/__xdata/=dvr_pfs1:.",
 			.mime_types = "*=application/octet-stream",
+			.fs = &g_mg_fs_ps2sdk_posix,
 		};
 		// Allow Mongoose to serve the request
 		mg_http_serve_dir(c, hm, &opts);

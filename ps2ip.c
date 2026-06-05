@@ -413,15 +413,55 @@ static void poweroffCallback(void *arg)
 }
 
 static void mongoose_server_thread(void *args);
+static void fillbuf_thread(void *args);
 
+struct fillbuf_data
+{
+	int m_ret;
+	int m_offset;
+	int m_fd;
+	int m_rdsema;
+	int m_sdsema;
+	u8 m_buf[MG_IO_SIZE] __attribute__((aligned(64)));
+};
+static int g_fillbuf_tid;
+static int g_fillbuf_fd;
 static int g_mongoose_server_tid;
+static u8 g_fillbuf_stack[0x10000] __attribute__((aligned(16)));
 static u8 g_mongoose_server_stack[0x10000] __attribute__((aligned(16)));
+static struct fillbuf_data g_fillbuf_data[2];
+static int g_fillbuf_curdata_read;
+static int g_fillbuf_curdata_send;
 
 //-------------------------------------------------------------------------
 // modified for EE
 static void start_mongoose_server(void)
 {
     ee_thread_t thread_param;
+    ee_sema_t sema_param;
+    unsigned int i;
+
+    memset(&sema_param, 0, sizeof(sema_param));
+	sema_param.init_count = 0;
+	sema_param.max_count = 1;
+	sema_param.option = 0;
+	for (i = 0; i < (sizeof(g_fillbuf_data)/sizeof(g_fillbuf_data[0])); i += 1)
+	{
+		g_fillbuf_data[i].m_rdsema = CreateSema(&sema_param);
+		g_fillbuf_data[i].m_sdsema = CreateSema(&sema_param);
+		g_fillbuf_data[i].m_fd = -1;
+	}		
+	g_fillbuf_curdata_read = 0;
+	g_fillbuf_curdata_send = 0;
+	g_fillbuf_fd = -1;
+
+    thread_param.func             = (void *)fillbuf_thread;
+    thread_param.stack            = g_fillbuf_stack;
+    thread_param.stack_size       = sizeof(g_fillbuf_stack);
+    thread_param.gp_reg           = &_gp;
+    thread_param.option           = 0;
+    thread_param.initial_priority = 0x10;
+    g_fillbuf_tid = CreateThread(&thread_param);
 
     thread_param.func             = (void *)mongoose_server_thread;
     thread_param.stack            = g_mongoose_server_stack;
@@ -431,6 +471,7 @@ static void start_mongoose_server(void)
     thread_param.initial_priority = 0x10;
     g_mongoose_server_tid = CreateThread(&thread_param);
 
+    StartThread(g_fillbuf_tid, 0);
     StartThread(g_mongoose_server_tid, 0);
 }
 
@@ -438,8 +479,29 @@ static void start_mongoose_server(void)
 // modified for EE
 static void stop_mongoose_server(void)
 {
+	int i;
     // delete threads
+	for (i = 0; i < (sizeof(g_fillbuf_data)/sizeof(g_fillbuf_data[0])); i += 1)
+	{
+		DeleteSema(g_fillbuf_data[i].m_rdsema);
+		DeleteSema(g_fillbuf_data[i].m_sdsema);
+	}
+    DeleteThread(g_fillbuf_tid);
     DeleteThread(g_mongoose_server_tid);
+}
+
+static void fillbuf_thread(void *args)
+{
+	while (1)
+	{
+		int curdata;
+		curdata = g_fillbuf_curdata_read;
+		WaitSema(g_fillbuf_data[curdata].m_rdsema);
+		g_fillbuf_data[curdata].m_ret = read(g_fillbuf_data[curdata].m_fd, g_fillbuf_data[curdata].m_buf, sizeof(g_fillbuf_data[curdata].m_buf));
+		g_fillbuf_data[curdata].m_offset = 0;
+		SignalSema(g_fillbuf_data[curdata].m_sdsema);
+		g_fillbuf_curdata_read ^= 1;
+	}
 }
 
 #ifndef O_BINARY
@@ -474,20 +536,73 @@ static void xp_list(const char *dir, void (*fn)(const char *, void *),
 static void *xp_open(const char *path, int flags) {
 	int fd;
 
+	if (flags != MG_FS_READ)
+		return NULL;
 	fd = open(path, (flags == MG_FS_READ ? O_RDONLY : (O_RDWR | O_CREAT | O_APPEND)) | O_BINARY | O_CLOEXEC, 0777);
+	if (fd >= 0 && g_fillbuf_fd < 0) {
+		g_fillbuf_fd = fd;
+		g_fillbuf_curdata_send = g_fillbuf_curdata_read;
+	}
 	return (fd >= 0) ? (void *)(uiptr)fd : NULL;
 }
 
 static void xp_close(void *fp) {
+	if ((int)(uiptr)fp == g_fillbuf_fd)
+	{
+		int i;
+		WaitSema(g_fillbuf_data[g_fillbuf_curdata_send ^ 1].m_sdsema);
+		for (i = 0; i < (sizeof(g_fillbuf_data)/sizeof(g_fillbuf_data[0])); i += 1)
+		{
+			g_fillbuf_data[i].m_fd = -1;
+		}
+		for (i = 0; i < (sizeof(g_fillbuf_data)/sizeof(g_fillbuf_data[0])); i += 1)
+		{
+			g_fillbuf_data[i].m_ret = 0;
+			g_fillbuf_data[i].m_offset = 0;
+		}
+		g_fillbuf_fd = -1;
+	}
 	close((int)(uiptr)fp);
 }
 
 static size_t xp_read(void *fp, void *buf, size_t len) {
-	return read((int)(uiptr)fp, buf, len);
+	size_t xlen;
+	int fd;
+
+	fd = (int)(uiptr)fp;
+	if (fd != g_fillbuf_fd)
+		return read(fd, buf, len);
+	if (g_fillbuf_data[g_fillbuf_curdata_send].m_offset == g_fillbuf_data[g_fillbuf_curdata_send].m_ret || g_fillbuf_data[g_fillbuf_curdata_send].m_ret < 0)
+	{
+		if (g_fillbuf_data[g_fillbuf_curdata_send].m_ret <= 0 && g_fillbuf_data[g_fillbuf_curdata_send ^ 1].m_ret <= 0)
+		{
+			// Initial fill
+			g_fillbuf_data[g_fillbuf_curdata_send].m_fd = fd;
+			g_fillbuf_data[g_fillbuf_curdata_send ^ 1].m_fd = fd;
+			SignalSema(g_fillbuf_data[g_fillbuf_curdata_send].m_rdsema);
+			SignalSema(g_fillbuf_data[g_fillbuf_curdata_send ^ 1].m_rdsema);
+			WaitSema(g_fillbuf_data[g_fillbuf_curdata_send].m_sdsema);
+		}
+		else
+		{
+			g_fillbuf_curdata_send ^= 1;
+			WaitSema(g_fillbuf_data[g_fillbuf_curdata_send].m_sdsema);
+			SignalSema(g_fillbuf_data[g_fillbuf_curdata_send ^ 1].m_rdsema);
+		}
+	}
+	xlen = len;
+	if (xlen > g_fillbuf_data[g_fillbuf_curdata_send].m_ret - g_fillbuf_data[g_fillbuf_curdata_send].m_offset)
+	{
+		xlen = g_fillbuf_data[g_fillbuf_curdata_send].m_ret - g_fillbuf_data[g_fillbuf_curdata_send].m_offset;
+	}
+	memcpy(buf, ((u8 *)g_fillbuf_data[g_fillbuf_curdata_send].m_buf) + g_fillbuf_data[g_fillbuf_curdata_send].m_offset, xlen);
+	g_fillbuf_data[g_fillbuf_curdata_send].m_offset += xlen;
+	return xlen;
 }
 
 static size_t xp_write(void *fp, const void *buf, size_t len) {
-	return write((int)(uiptr)fp, buf, len);
+	// return write((int)(uiptr)fp, buf, len);
+	return 0;
 }
 
 static size_t xp_seek(void *fp, size_t offset) {

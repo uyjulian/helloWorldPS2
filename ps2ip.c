@@ -20,7 +20,7 @@
 #define NEWLIB_PORT_AWARE
 #include <fileXio_rpc.h>
 #include <libcdvd.h>
-#include <mongoose/mongoose.h>
+#include <mongoose/mongoose.c>
 #include <delaythread.h>
 #include <ps2sdkapi.h>
 
@@ -263,8 +263,6 @@ static void stop_mongoose_server(void);
 
 static void poweroffCallback(void *arg);
 
-static const char *device_point = "hdd0:";
-
 int main(int argc, char *argv[])
 {
 	struct ip4_addr IP, NM, GW, DNS;
@@ -288,6 +286,10 @@ int main(int argc, char *argv[])
 
 	SifExecModuleBuffer(IOMANX_irx, size_IOMANX_irx, 0, NULL, NULL);
 	SifExecModuleBuffer(FILEXIO_irx, size_FILEXIO_irx, 0, NULL, NULL);
+
+	fileXioInit();
+    // Increase the FILEIO R/W buffer size to reduce overhead.
+    fileXioSetRWBufferSize(256 * 1024);
 
 	SifExecModuleBuffer(POWEROFF_irx, size_POWEROFF_irx, 0, NULL, NULL);
 	poweroffInit();
@@ -362,10 +364,15 @@ int main(int argc, char *argv[])
 	//Load modules
 	SifExecModuleBuffer(DVRDRV_irx, size_DVRDRV_irx, 0, NULL, NULL);
 	SifExecModuleBuffer(DVRFILE_irx, size_DVRFILE_irx, 0, NULL, NULL);
-    if (!fileXioDevctl("dvr_hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0) && (fileXioDevctl("dvr_hdd0:", HDIOC_ISLBA48, NULL, 0, NULL, 0) == 1))
+    if (!fileXioDevctl("dvr_hdd0:", HDIOC_STATUS, NULL, 0, NULL, 0))
     {
     	scr_printf("DVR is available!\n");
-    	device_point = "dvr_hdd0:";
+    	{
+    		// Set chunk buffer size
+    		u32 xarg;
+    		xarg = 0x20000;
+    		fileXioDevctl("dvr_hdd0:", 0x5065, &xarg, sizeof(xarg), NULL, 0);
+    	}
     }
 
 	scr_printf("Initing Mongoose HTTP server:\n");
@@ -443,7 +450,7 @@ static void stop_mongoose_server(void)
 #define O_CLOEXEC 0
 #endif
 
-static int p_stat(const char *path, size_t *size, time_t *mtime)
+static int xp_stat(const char *path, size_t *size, time_t *mtime)
 {
 	struct stat st;
 	if (stat(path, &st) != 0) return 0;
@@ -452,7 +459,7 @@ static int p_stat(const char *path, size_t *size, time_t *mtime)
 	return MG_FS_READ | MG_FS_WRITE | (S_ISDIR(st.st_mode) ? MG_FS_DIR : 0);
 }
 
-static void p_list(const char *dir, void (*fn)(const char *, void *),
+static void xp_list(const char *dir, void (*fn)(const char *, void *),
 									 void *userdata) {
 	struct dirent *dp;
 	DIR *dirp;
@@ -464,52 +471,52 @@ static void p_list(const char *dir, void (*fn)(const char *, void *),
 	closedir(dirp);
 }
 
-static void *p_open(const char *path, int flags) {
+static void *xp_open(const char *path, int flags) {
 	int fd;
 
 	fd = open(path, (flags == MG_FS_READ ? O_RDONLY : (O_RDWR | O_CREAT | O_APPEND)) | O_BINARY | O_CLOEXEC, 0777);
 	return (fd >= 0) ? (void *)(uiptr)fd : NULL;
 }
 
-static void p_close(void *fp) {
+static void xp_close(void *fp) {
 	close((int)(uiptr)fp);
 }
 
-static size_t p_read(void *fp, void *buf, size_t len) {
+static size_t xp_read(void *fp, void *buf, size_t len) {
 	return read((int)(uiptr)fp, buf, len);
 }
 
-static size_t p_write(void *fp, const void *buf, size_t len) {
+static size_t xp_write(void *fp, const void *buf, size_t len) {
 	return write((int)(uiptr)fp, buf, len);
 }
 
-static size_t p_seek(void *fp, size_t offset) {
+static size_t xp_seek(void *fp, size_t offset) {
 	return (size_t)lseek64((int)(uiptr)fp, (off64_t)offset, SEEK_SET);
 }
 
-static bool p_rename(const char *from, const char *to) {
+static bool xp_rename(const char *from, const char *to) {
 	return rename(from, to) == 0;
 }
 
-static bool p_remove(const char *path) {
+static bool xp_remove(const char *path) {
 	return remove(path) == 0;
 }
 
-static bool p_mkdir(const char *path) {
+static bool xp_mkdir(const char *path) {
 	return mkdir(path, 0775) == 0;
 }
 
 static struct mg_fs g_mg_fs_ps2sdk_posix = {
-	p_stat,
-	p_list,
-	p_open,
-	p_close,
-	p_read,
-	p_write,
-	p_seek,
-	p_rename,
-	p_remove,
-	p_mkdir,
+	xp_stat,
+	xp_list,
+	xp_open,
+	xp_close,
+	xp_read,
+	xp_write,
+	xp_seek,
+	xp_rename,
+	xp_remove,
+	xp_mkdir,
 };
 
 static int req_count = 0;

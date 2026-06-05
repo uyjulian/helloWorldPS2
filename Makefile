@@ -7,13 +7,13 @@
 # Review ps2sdk README & LICENSE files for further details.
 
 EE_BIN = ps2_mongoose_dvr_hdd.elf
-EE_OBJS = ps2ip.o mongoose/mongoose.o smap_irx.o netman_irx.o dev9_irx.o iomanX_irx.o fileXio_irx.o poweroff_irx.o atad_irx.o hdd_irx.o dvrdrv_irx.o dvrfile_irx.o
+EE_OBJS = ps2ip.o smap_irx.o netman_irx.o dev9_irx.o iomanX_irx.o fileXio_irx.o poweroff_irx.o atad_irx.o hdd_irx.o dvrdrv_irx.o dvrfile_irx.o
 EE_LIBS = -lpoweroff -lfileXio -lnetman -lps2ip -ldebug -lpatches -lc -ldebug -lpatches
 EE_INCS += -I$(PS2SDK)/ports/include
 EE_LDFLAGS += -L$(PS2SDK)/ports/lib
 
 EE_INCS += -I.
-EE_CFLAGS += -DMG_ARCH=MG_ARCH_UNIX -DMG_ENABLE_POLL=0 -DLWIP_IGMP=1 -DLWIP_SOCKET=1 -DMG_IO_SIZE=0x8000
+EE_CFLAGS += -DMG_ARCH=MG_ARCH_UNIX -DMG_ENABLE_POLL=0 -DLWIP_IGMP=1 -DLWIP_SOCKET=1 -DMG_IO_SIZE=0x20000
 
 all: $(EE_BIN)
 

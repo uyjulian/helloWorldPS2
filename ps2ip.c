@@ -300,6 +300,7 @@ int main(int argc, char *argv[])
 
 	init_scr();
 
+	scr_printf("Need help? Please visit https://uyjulian.github.io/desr-help/\n");
 	//The network interface link mode/duplex can be set.
 	EthernetLinkMode = NETMAN_NETIF_ETH_LINK_MODE_AUTO;
 

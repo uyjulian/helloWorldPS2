@@ -289,7 +289,7 @@ int main(int argc, char *argv[])
 
 	fileXioInit();
     // Increase the FILEIO R/W buffer size to reduce overhead.
-    fileXioSetRWBufferSize(256 * 1024);
+    fileXioSetRWBufferSize(0x40000);
 
 	SifExecModuleBuffer(POWEROFF_irx, size_POWEROFF_irx, 0, NULL, NULL);
 	poweroffInit();

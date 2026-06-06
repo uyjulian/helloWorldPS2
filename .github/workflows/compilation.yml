@@ -2,51 +2,73 @@ name: CI
 
 on:
   push:
-    branches: 
-      - '*'
+    branches:
+      - "*"
     tags:
       - v*
   pull_request:
   repository_dispatch:
     types: [run_build]
+  workflow_dispatch: {}
+
+env:
+  CMAKE_GENERATOR: Ninja
+  DEBIAN_FRONTEND: noninteractive
+  TZ: Japan
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        docker_tag: [v1.0, v1.1, v1.2.0, latest]
-        flags: [
-          DUMMY_LIBC_INIT=1, 
-          DUMMY_TIMEZONE=1, 
-          KERNEL_NOPATCH=1, 
-          NEWLIB_NANO=1, 
-          KERNEL_NOPATCH=1 NEWLIB_NANO=1,
-          KERNEL_NOPATCH=1 NEWLIB_NANO=1 DUMMY_LIBC_INIT=1,
-          KERNEL_NOPATCH=1 NEWLIB_NANO=1 DUMMY_TIMEZONE=1,  
-          DEFAULT=1
-          ]
+    container: ghcr.io/ps2dev/ps2sdk:latest
+    timeout-minutes: 10
 
-    container: ps2dev/ps2dev:${{ matrix.docker_tag }}
     steps:
-    - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apk add build-base git
 
-    - name: Install dependencies
-      run: |
-        apk add build-base
-    
-    - name: Compile project
-      run: |
-        make -j $(getconf _NPROCESSORS_ONLN) clean
-        make -j $(getconf _NPROCESSORS_ONLN) all ${{ matrix.flags }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Get short SHA
-      id: slug
-      run: echo "sha8=$(echo ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_OUTPUT
+      - name: Compile project
+        run: |
+          make -j $(getconf _NPROCESSORS_ONLN) clean 
+          make -j $(getconf _NPROCESSORS_ONLN)
 
-    - name: Upload artifacts
-      if: ${{ success() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: hello-${{ steps.slug.outputs.sha8 }}-${{matrix.docker_tag}}-${{ matrix.flags }}
-        path: hello.elf
+      - name: Get short SHA
+        id: slug
+        run: |
+          printf '%s\n' "sha8=$(printf '%s\n' ${GITHUB_SHA} | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-${{ steps.slug.outputs.sha8 }}
+          path: "*.elf"
+
+  create-release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ubuntu:20.04
+      options: "--user 0"
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifact
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Set up p7zip
+        run: "apt-get -y update && apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' install p7zip-full"
+      - name: Prepare artifacts for release
+        run: "7z a -tzip ${{ github.event.repository.name }}-${{ github.ref_name }}.zip *.elf"
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: marvinpinto/action-automatic-releases@latest
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: ${{ contains(github.ref, '-rc') }}
+          files: "${{ github.event.repository.name }}-${{ github.ref_name }}.zip"

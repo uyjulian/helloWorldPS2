@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.repository.name }}-${{ steps.slug.outputs.sha8 }}
-          path: *.elf
+          path: "*.elf"
 
   create-release:
     needs: [build]

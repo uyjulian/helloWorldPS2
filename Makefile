@@ -20,7 +20,7 @@ IOPMODULES_PS2SDK = \
 	usbd \
 	usbmass_bd
 
-PKGCONFIG_DEPS = libarchive
+export PKGCONFIG_DEPS = libarchive
 
 EE_BIN = hddrework7z.elf
 EE_OBJS = ps2ip.o xdevctl_irx.o dvrrelay_irx.o
@@ -64,5 +64,10 @@ ps2sdk_%_irx.c: $(PS2SDK)/iop/irx/%.irx
 include $(PS2SDK)/samples/Makefile.pref
 include $(PS2SDK)/samples/Makefile.eeglobal
 
-EE_LIBS += $(shell $(EE_TOOL_PREFIX)pkg-config --libs $(PKGCONFIG_DEPS))
-EE_CFLAGS += $(shell $(EE_TOOL_PREFIX)pkg-config --cflags $(PKGCONFIG_DEPS))
+export EE_TOOL_PREFIX
+
+EE_PKGCONFIG_LIBS := $(shell sh -c "$(EE_TOOL_PREFIX)pkg-config --libs $(PKGCONFIG_DEPS)")
+EE_PKGCONFIG_CFLAGS := $(shell sh -c "$(EE_TOOL_PREFIX)pkg-config --cflags $(PKGCONFIG_DEPS)")
+
+EE_LIBS += $(EE_PKGCONFIG_LIBS)
+EE_CFLAGS += $(EE_PKGCONFIG_CFLAGS)

@@ -45,6 +45,7 @@ jobs:
         with:
           name: ${{ github.event.repository.name }}-${{ steps.slug.outputs.sha8 }}
           path: *.elf
+
   create-release:
     needs: [build]
     runs-on: ubuntu-latest

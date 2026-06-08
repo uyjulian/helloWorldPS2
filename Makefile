@@ -66,8 +66,8 @@ include $(PS2SDK)/samples/Makefile.eeglobal
 
 export EE_TOOL_PREFIX
 
-EE_PKGCONFIG_LIBS := $(shell sh -c "$(EE_TOOL_PREFIX)pkg-config --libs $(PKGCONFIG_DEPS)")
-EE_PKGCONFIG_CFLAGS := $(shell sh -c "$(EE_TOOL_PREFIX)pkg-config --cflags $(PKGCONFIG_DEPS)")
+EE_PKGCONFIG_LIBS := $(shell $(EE_TOOL_PREFIX)pkg-config --libs $(PKGCONFIG_DEPS))
+EE_PKGCONFIG_CFLAGS := $(shell $(EE_TOOL_PREFIX)pkg-config --cflags $(PKGCONFIG_DEPS))
 
 EE_LIBS += $(EE_PKGCONFIG_LIBS)
 EE_CFLAGS += $(EE_PKGCONFIG_CFLAGS)

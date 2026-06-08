@@ -19,7 +19,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ghcr.io/ps2dev/ps2sdk:latest
+    container: ghcr.io/ps2dev/ps2dev:latest
     timeout-minutes: 10
 
     steps:
